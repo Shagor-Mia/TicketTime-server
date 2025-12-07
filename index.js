@@ -1,0 +1,175 @@
+const express = require("express");
+const cors = require("cors");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+
+require("dotenv").config();
+const stripe = require("stripe")(process.env.STRIPE_KEY);
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+const admin = require("firebase-admin");
+
+// firebase adminSDK
+const fs = require("fs");
+const { count } = require("console");
+const { format } = require("path");
+
+const serviceAccount = JSON.parse(
+  Buffer.from(process.env.FIREBASE_ADMIN, "base64").toString("utf8")
+);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+// trackingId
+const generateTrackingId = () => {
+  const prefix = "PRCL";
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
+  const random = Math.random().toString(36).substring(2, 10).toUpperCase(); // 8-char random
+
+  return `${prefix}-${date}-${random}`;
+};
+
+// middlewares
+app.use(express.json());
+app.use(cors());
+
+const verifyFirebaseToken = async (req, res, next) => {
+  console.log("authorizeToken,", req.headers.authorization);
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.status(401).send({ message: `unauthorized access` });
+  }
+  try {
+    const idToken = token.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    console.log(`decoded in the token`, decoded);
+    req.decoded_email = decoded.email;
+  } catch (error) {
+    return res.status(401).send({ message: "Invalid or expired token", error });
+  }
+  next();
+};
+
+const uri = process.env.URL;
+
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
+});
+
+async function run() {
+  try {
+    // Connect the client to the server	(optional starting in v4.7)
+    // await client.connect();
+    const db = client.db("TicketTimeDB");
+    const userCollection = db.collection("users");
+    const paymentCollection = db.collection("payments");
+    const riderCollection = db.collection("vendors");
+
+    // user apis
+    // middleware for admin access,must be used after verifyToken
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded_email;
+      const admin = await userCollection.findOne({ email });
+      if (!admin || admin.role !== "admin") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
+    };
+    // middleware for admin access,must be used after verifyToken
+    const verifyVendors = async (req, res, next) => {
+      const email = req.decoded_email;
+      console.log(email);
+      const rider = await userCollection.findOne({ email });
+      if (!rider || rider.role !== "rider") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
+    };
+
+    app.get("/users", verifyFirebaseToken, async (req, res) => {
+      // console.log(verifyFirebaseToken);
+      const searchText = req.query.searchText;
+      const query = {};
+      if (searchText) {
+        query.$or = [
+          { displayName: { $regex: searchText, $options: "i" } },
+          { email: { $regex: searchText, $options: "i" } },
+        ];
+      }
+
+      const result = await userCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .toArray();
+      res.send(result);
+    });
+
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+      user.role = "user";
+      user.createdAt = new Date();
+
+      const email = user.email;
+      const userExist = await userCollection.findOne({ email });
+      if (userExist) {
+        return res.send({ message: "user already exist!" });
+      }
+
+      const result = await userCollection.insertOne(user);
+      res.send(result);
+    });
+
+    app.get("/users/:id", async (req, res) => {});
+
+    app.get("/users/:email/role", async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      if (!user) {
+        res.status(401).send({ message: "user not found" });
+      } else {
+        res.send({ role: user?.role || "user" });
+      }
+    });
+
+    app.patch(
+      "/users/:id/role",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {}
+    );
+
+    // payment related apis
+
+    // stripe integration
+    app.post("/payment-checkout-session", async (req, res) => {});
+
+    // verify payment
+    app.patch("/payment-success", async (req, res) => {});
+
+    // riders api
+
+    console.log(
+      "Pinged your deployment. You successfully connected to MongoDB!"
+    );
+  } finally {
+    // Ensures that the client will close when you finish/error
+    // await client.close();
+  }
+}
+run().catch(console.dir);
+
+app.get("/", (req, res) => {
+  res.send("online ticket booking!");
+});
+
+app.listen(port, () => {
+  console.log(` app listening on port ${port}`);
+});
