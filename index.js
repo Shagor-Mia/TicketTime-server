@@ -143,7 +143,18 @@ async function run() {
       "/users/:id/role",
       verifyFirebaseToken,
       verifyAdmin,
-      async (req, res) => {}
+      async (req, res) => {
+        const id = req.params.id;
+        const roleInfo = req.body;
+        const query = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            role: roleInfo.role,
+          },
+        };
+        const result = await userCollection.updateOne(query, updateDoc);
+        res.send(result);
+      }
     );
 
     // payment related apis
