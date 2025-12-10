@@ -37,7 +37,7 @@ app.use(express.json());
 app.use(cors());
 
 const verifyFirebaseToken = async (req, res, next) => {
-  console.log("authorizeToken,", req.headers.authorization);
+  // console.log("authorizeToken,", req.headers.authorization);
   const token = req.headers.authorization;
   if (!token) {
     return res.status(401).send({ message: `unauthorized access` });
@@ -45,7 +45,7 @@ const verifyFirebaseToken = async (req, res, next) => {
   try {
     const idToken = token.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-    console.log(`decoded in the token`, decoded);
+    // console.log(`decoded in the token`, decoded);
     req.decoded_email = decoded.email;
   } catch (error) {
     return res.status(401).send({ message: "Invalid or expired token", error });
@@ -136,6 +136,33 @@ async function run() {
         res.status(401).send({ message: "user not found" });
       } else {
         res.send({ role: user?.role || "user" });
+      }
+    });
+
+    // FLEXIBLE USER PROFILE UPDATE
+    app.patch("/users", verifyFirebaseToken, async (req, res) => {
+      const { email } = req.query;
+      const { displayName, photoURL } = req.body;
+
+      if (!email) return res.status(400).send({ message: "Email is required" });
+
+      try {
+        const user = await userCollection.findOne({ email });
+        if (!user) return res.status(404).send({ message: "User not found" });
+        if (req.decoded_email !== user.email)
+          return res.status(403).send({ message: "Forbidden" });
+
+        const updates = {};
+        if (displayName) updates.displayName = displayName;
+        if (photoURL) updates.photoURL = photoURL;
+
+        if (Object.keys(updates).length > 0) {
+          await userCollection.updateOne({ email }, { $set: updates });
+        }
+
+        res.send({ message: "Profile updated successfully", updated: updates });
+      } catch (err) {
+        res.status(500).send({ message: "Update failed", error: err.message });
       }
     });
 
