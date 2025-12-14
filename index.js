@@ -70,7 +70,7 @@ async function run() {
     const db = client.db("TicketTimeDB");
     const userCollection = db.collection("users");
     const paymentCollection = db.collection("payments");
-    const riderCollection = db.collection("vendors");
+    const vendorCollection = db.collection("vendors");
 
     // user apis
     // middleware for admin access,must be used after verifyToken
@@ -166,6 +166,7 @@ async function run() {
       }
     });
 
+    // admin patch for role(admin ,user)
     app.patch(
       "/users/:id/role",
       verifyFirebaseToken,
@@ -180,6 +181,102 @@ async function run() {
           },
         };
         const result = await userCollection.updateOne(query, updateDoc);
+        res.send(result);
+      }
+    );
+
+    // vendor api
+    app.get("/vendors", async (req, res) => {
+      const { status, location, workStatus } = req.query;
+      const query = {};
+      if (status) {
+        query.status = status;
+      }
+      if (location) {
+        query.location = location;
+      }
+      if (workStatus) {
+        query.workStatus = workStatus;
+      }
+      const vendor = await vendorCollection.find(query).toArray();
+      res.send(vendor);
+    });
+
+    // get logged-in vendor (single user)
+    app.get("/vendors/me", verifyFirebaseToken, async (req, res) => {
+      const email = req.decoded_email;
+
+      // find user from users collection
+      const user = await userCollection.findOne({ email });
+
+      // not found or not vendor
+      if (!user || user.role !== "vendor") {
+        return res.status(403).send({ message: "You are not a vendor" });
+      }
+
+      res.send({
+        ...user,
+      });
+    });
+
+    // became vendors
+    app.post("/vendors", verifyFirebaseToken, async (req, res) => {
+      const vendor = req.body;
+      const email = req.decoded_email;
+      const alreadyExists = await vendorCollection.findOne({ email });
+      if (alreadyExists)
+        return res
+          .status(409)
+          .send({ message: "Already requested, wait for response." });
+      vendor.status = "pending";
+      vendor.createdAt = new Date();
+
+      const result = await vendorCollection.insertOne(vendor);
+      res.send(result);
+    });
+
+    // update vendor status,role
+    app.patch(
+      "/vendors/:id",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        const { status } = req.body;
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            status: status,
+            workStatus: "ticket available",
+          },
+        };
+        const result = await vendorCollection.updateOne(query, updateDoc);
+        if (status === "approved") {
+          const email = req.body.email;
+          const userQuery = { email };
+          const updateUser = {
+            $set: {
+              role: "vendor",
+            },
+          };
+          const userResult = await userCollection.updateOne(
+            userQuery,
+            updateUser
+          );
+        }
+        res.send(result);
+      }
+    );
+
+    // delete a vendors
+    app.delete(
+      "/vendors/:id",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await vendorCollection.deleteOne(query);
         res.send(result);
       }
     );
