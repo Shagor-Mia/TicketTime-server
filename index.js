@@ -73,6 +73,19 @@ async function run() {
     const vendorCollection = db.collection("vendors");
     const ticketCollection = db.collection("tickets");
     const bookingCollection = db.collection("bookings");
+    const trackingCollection = db.collection("tracking");
+
+    // tracking
+    const generateTrackingId = async (trackingId, status) => {
+      const log = {
+        trackingId,
+        status,
+        createdAt: new Date(),
+        details: status.split("_").join(" "),
+      };
+      const result = await trackingCollection.insertOne(log);
+      return result;
+    };
 
     // user apis
     // middleware for admin access,must be used after verifyToken
@@ -488,13 +501,165 @@ async function run() {
       res.send(bookings);
     });
 
+    // get tickets for vendors
+    app.get(
+      "/bookings/vendor",
+      verifyFirebaseToken,
+      verifyVendors,
+      async (req, res) => {
+        const email = req.decoded_email;
+
+        const bookings = await bookingCollection
+          .find({ vendorEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(bookings);
+      }
+    );
+
+    // vendor accept/reject
+    app.patch(
+      "/bookings/:id/status",
+      verifyFirebaseToken,
+      verifyVendors,
+      async (req, res) => {
+        const { status } = req.body;
+        const id = req.params.id;
+
+        if (!["accepted", "rejected"].includes(status)) {
+          return res.status(400).send({ message: "Invalid status" });
+        }
+
+        const result = await bookingCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status } }
+        );
+
+        res.send(result);
+      }
+    );
+
     // payment related apis
 
     // stripe integration
-    app.post("/payment-checkout-session", async (req, res) => {});
+    app.post(
+      "/payment-checkout-session",
+      verifyFirebaseToken,
+      async (req, res) => {
+        try {
+          const {
+            bookingId,
+            ticketTitle,
+            ticketImage,
+            from,
+            to,
+            departure,
+            quantity,
+            unitPrice,
+            userName,
+          } = req.body;
+
+          const payerEmail = req.decoded_email; //  trusted
+
+          const booking = await bookingCollection.findOne({
+            _id: new ObjectId(bookingId),
+          });
+          if (!booking)
+            return res.status(404).send({ message: "Booking not found" });
+
+          if (booking.status !== "accepted") {
+            return res.status(400).send({ message: "Booking not accepted" });
+          }
+
+          const now = new Date();
+          if (new Date(departure) < now) {
+            return res
+              .status(400)
+              .send({ message: "Cannot pay for expired booking" });
+          }
+
+          const session = await stripe.checkout.sessions.create({
+            payment_method_types: ["card"],
+            customer_email: payerEmail, //  Stripe receipt email
+            metadata: {
+              bookingId,
+              userEmail: payerEmail,
+              userName,
+            },
+            line_items: [
+              {
+                price_data: {
+                  currency: "usd",
+                  product_data: {
+                    name: ticketTitle,
+                    images: [ticketImage || "https://via.placeholder.com/150"],
+                    description: `${from} → ${to}`,
+                  },
+                  unit_amount: unitPrice * 100,
+                },
+                quantity,
+              },
+            ],
+            mode: "payment",
+            success_url: `${process.env.DOMAIN_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&bookingId=${bookingId}`,
+            cancel_url: `${process.env.DOMAIN_URL}/my-orders`,
+          });
+
+          res.send({ url: session.url });
+        } catch (err) {
+          res.status(500).send({
+            message: "Payment session creation failed",
+            error: err.message,
+          });
+        }
+      }
+    );
 
     // verify payment
-    app.patch("/payment-success", async (req, res) => {});
+    app.patch("/payment-success", verifyFirebaseToken, async (req, res) => {
+      try {
+        const { session_id, bookingId } = req.query;
+
+        const session = await stripe.checkout.sessions.retrieve(session_id);
+        if (session.payment_status !== "paid") {
+          return res.status(400).send({ message: "Payment not completed" });
+        }
+
+        const payerEmail = session.metadata.userEmail;
+        const payerName = session.metadata.userName;
+
+        await bookingCollection.updateOne(
+          { _id: new ObjectId(bookingId) },
+          {
+            $set: {
+              status: "paid",
+              paymentDate: new Date(),
+              transactionId: session.payment_intent,
+            },
+          }
+        );
+
+        await paymentCollection.insertOne({
+          bookingId: new ObjectId(bookingId),
+          userEmail: payerEmail,
+          userName: payerName,
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          transactionId: session.payment_intent,
+          paymentDate: new Date(),
+        });
+
+        res.send({
+          message: "Payment successful",
+          transactionId: session.payment_intent,
+        });
+      } catch (err) {
+        res
+          .status(500)
+          .send({ message: "Payment verification failed", error: err.message });
+      }
+    });
 
     // riders api
 
