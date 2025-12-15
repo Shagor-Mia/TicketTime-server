@@ -71,6 +71,7 @@ async function run() {
     const userCollection = db.collection("users");
     const paymentCollection = db.collection("payments");
     const vendorCollection = db.collection("vendors");
+    const ticketCollection = db.collection("tickets");
 
     // user apis
     // middleware for admin access,must be used after verifyToken
@@ -86,8 +87,8 @@ async function run() {
     const verifyVendors = async (req, res, next) => {
       const email = req.decoded_email;
       console.log(email);
-      const rider = await userCollection.findOne({ email });
-      if (!rider || rider.role !== "rider") {
+      const vendor = await userCollection.findOne({ email });
+      if (!vendor || vendor.role !== "vendor") {
         return res.status(403).send({ message: "forbidden access" });
       }
       next();
@@ -278,6 +279,146 @@ async function run() {
         const query = { _id: new ObjectId(id) };
         const result = await vendorCollection.deleteOne(query);
         res.send(result);
+      }
+    );
+
+    // GET approved tickets for users
+    app.get("/tickets/approved", async (req, res) => {
+      try {
+        const tickets = await ticketCollection
+          .find({ verificationStatus: "approved" })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(tickets);
+      } catch (error) {
+        res.status(500).send({
+          message: "Failed to fetch approved tickets",
+          error: error.message,
+        });
+      }
+    });
+
+    // GET /tickets/:id
+    app.get("/ticket/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const ticket = await ticketCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!ticket)
+          return res.status(404).send({ message: "Ticket not found" });
+        res.send(ticket);
+      } catch (error) {
+        res
+          .status(500)
+          .send({ message: "Failed to fetch ticket", error: error.message });
+      }
+    });
+
+    // Create a new ticket (only for verified vendors)
+    app.post(
+      "/tickets",
+      verifyFirebaseToken,
+      verifyVendors,
+      async (req, res) => {
+        try {
+          const ticket = req.body;
+
+          // Get vendor info from decoded email
+          const vendor = await userCollection.findOne({
+            email: req.decoded_email,
+          });
+
+          if (!vendor) {
+            return res.status(403).send({ message: "Vendor not found" });
+          }
+
+          // Attach vendor info to the ticket
+          ticket.vendor = {
+            name: vendor.displayName,
+            email: vendor.email,
+          };
+
+          // Set initial verification status
+          ticket.verificationStatus = "pending";
+          ticket.createdAt = new Date();
+
+          // Insert ticket into tickets collection
+          const result = await ticketCollection.insertOne(ticket);
+
+          res.send(result);
+        } catch (err) {
+          console.error(err);
+          res
+            .status(500)
+            .send({ message: "Failed to create ticket", error: err.message });
+        }
+      }
+    );
+
+    // GET /tickets/pending for admin
+    app.get(
+      "/tickets/pending",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const tickets = await ticketCollection
+            .find({ verificationStatus: "pending" })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+          res.send(tickets);
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({
+            message: "Failed to fetch pending tickets",
+            error: err.message,
+          });
+        }
+      }
+    );
+    //
+    app.get("/tickets", verifyFirebaseToken, verifyAdmin, async (req, res) => {
+      const tickets = await ticketCollection
+        .find({})
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(tickets);
+    });
+
+    // approve / reject ticket (admin only)
+    app.patch(
+      "/tickets/:id/approve",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const { status } = req.body;
+
+          if (!["approved", "rejected"].includes(status)) {
+            return res.status(400).send({ message: "Invalid status" });
+          }
+
+          const result = await ticketCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: {
+                verificationStatus: status,
+                verifiedAt: new Date(),
+              },
+            }
+          );
+
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({
+            message: "Failed to update ticket status",
+            error: error.message,
+          });
+        }
       }
     );
 
