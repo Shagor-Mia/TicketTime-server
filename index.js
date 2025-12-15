@@ -72,6 +72,7 @@ async function run() {
     const paymentCollection = db.collection("payments");
     const vendorCollection = db.collection("vendors");
     const ticketCollection = db.collection("tickets");
+    const bookingCollection = db.collection("bookings");
 
     // user apis
     // middleware for admin access,must be used after verifyToken
@@ -421,6 +422,71 @@ async function run() {
         }
       }
     );
+
+    // booking
+    app.post("/bookings", verifyFirebaseToken, async (req, res) => {
+      try {
+        const booking = req.body;
+        const ticketId = booking.ticketId;
+        const qty = booking.quantity;
+
+        // 1 Find ticket
+        const ticket = await ticketCollection.findOne({
+          _id: new ObjectId(ticketId),
+        });
+
+        if (!ticket) {
+          return res.status(404).send({ message: "Ticket not found" });
+        }
+
+        // 2 Check availability
+        if (ticket.quantity < qty) {
+          return res.status(400).send({
+            message: "Not enough tickets available",
+          });
+        }
+
+        // 3 Create booking
+        const newBooking = {
+          ...booking,
+          userEmail: req.decoded_email,
+          status: "pending",
+          createdAt: new Date(),
+        };
+
+        const bookingResult = await bookingCollection.insertOne(newBooking);
+
+        // 4 Reduce ticket quantity
+        await ticketCollection.updateOne(
+          { _id: new ObjectId(ticketId) },
+          {
+            $inc: { quantity: -qty },
+          }
+        );
+
+        res.send({
+          success: true,
+          bookingId: bookingResult.insertedId,
+        });
+      } catch (error) {
+        res.status(500).send({
+          message: "Failed to create booking",
+          error: error.message,
+        });
+      }
+    });
+
+    // user bookings
+    app.get("/bookings/user", verifyFirebaseToken, async (req, res) => {
+      const email = req.decoded_email;
+
+      const bookings = await bookingCollection
+        .find({ userEmail: email })
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.send(bookings);
+    });
 
     // payment related apis
 
