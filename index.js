@@ -37,7 +37,7 @@ app.use(express.json());
 app.use(cors());
 
 const verifyFirebaseToken = async (req, res, next) => {
-  // console.log("authorizeToken,", req.headers.authorization);
+  console.log("authorizeToken,", req.headers.authorization);
   const token = req.headers.authorization;
   if (!token) {
     return res.status(401).send({ message: `unauthorized access` });
@@ -91,9 +91,10 @@ async function run() {
     // middleware for admin access,must be used after verifyToken
     const verifyAdmin = async (req, res, next) => {
       const email = req.decoded_email;
+      console.log(email);
       const admin = await userCollection.findOne({ email });
       if (!admin || admin.role !== "admin") {
-        return res.status(403).send({ message: "forbidden access" });
+        return res.status(403).send({ message: "forbidden access as admin" });
       }
       next();
     };
@@ -103,7 +104,7 @@ async function run() {
       console.log(email);
       const vendor = await userCollection.findOne({ email });
       if (!vendor || vendor.role !== "vendor") {
-        return res.status(403).send({ message: "forbidden access" });
+        return res.status(403).send({ message: "forbidden access as vendor" });
       }
       next();
     };
@@ -313,6 +314,30 @@ async function run() {
       }
     });
 
+    // GET all tickets created by logged-in vendor
+    app.get(
+      "/tickets/vendor/me",
+      verifyFirebaseToken,
+      verifyVendors,
+      async (req, res) => {
+        try {
+          const email = req.decoded_email;
+
+          const tickets = await ticketCollection
+            .find({ "vendor.email": email })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+          res.send(tickets);
+        } catch (error) {
+          res.status(500).send({
+            message: "Failed to fetch vendor tickets",
+            error: error.message,
+          });
+        }
+      }
+    );
+
     // GET /tickets/:id
     app.get("/ticket/:id", async (req, res) => {
       try {
@@ -338,6 +363,7 @@ async function run() {
       async (req, res) => {
         try {
           const ticket = req.body;
+          console.log(ticket);
 
           // Get vendor info from decoded email
           const vendor = await userCollection.findOne({
@@ -501,6 +527,15 @@ async function run() {
       res.send(bookings);
     });
 
+    // get all bookings
+    app.get("/bookings", async (req, res) => {
+      const bookings = await bookingCollection
+        .find()
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(bookings);
+    });
+
     // get tickets for vendors
     app.get(
       "/bookings/vendor",
@@ -531,6 +566,21 @@ async function run() {
           return res.status(400).send({ message: "Invalid status" });
         }
 
+        // 1. Find the booking
+        const booking = await bookingCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!booking)
+          return res.status(404).send({ message: "Booking not found" });
+
+        // 2. If rejected, restore ticket quantity
+        if (status === "rejected") {
+          await ticketCollection.updateOne(
+            { _id: new ObjectId(booking.ticketId) },
+            { $inc: { quantity: booking.quantity } } // restore tickets
+          );
+        }
+
         const result = await bookingCollection.updateOne(
           { _id: new ObjectId(id) },
           { $set: { status } }
@@ -543,91 +593,97 @@ async function run() {
     // payment related apis
 
     // stripe integration
-    app.post(
-      "/payment-checkout-session",
-      verifyFirebaseToken,
-      async (req, res) => {
-        try {
-          const {
+    app.post("/payment-checkout-session", async (req, res) => {
+      try {
+        const {
+          bookingId,
+          ticketTitle,
+          ticketImage,
+          userName,
+          userEmail,
+          unitPrice,
+          quantity,
+        } = req.body;
+
+        // Validate required fields
+        if (
+          !bookingId ||
+          !ticketTitle ||
+          !unitPrice ||
+          !quantity ||
+          !userEmail
+        ) {
+          return res.status(400).send({ message: "Missing required fields" });
+        }
+
+        // Stripe expects amount in cents
+        // const amount = Math.round(unitPrice * quantity * 100);
+
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          customer_email: userEmail,
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                unit_amount: Math.round(unitPrice * 100), // ✅ FIX
+                product_data: {
+                  name: ticketTitle,
+                  images: ticketImage ? [ticketImage] : [],
+                },
+              },
+              quantity, // ✅ Stripe handles total
+            },
+          ],
+          mode: "payment",
+          metadata: {
             bookingId,
+            userEmail,
+            userName,
             ticketTitle,
             ticketImage,
-            from,
-            to,
-            departure,
-            quantity,
-            unitPrice,
-            userName,
-          } = req.body;
+          },
+          success_url: `${process.env.DOMAIN_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.DOMAIN_URL}/my-orders`,
+        });
 
-          const payerEmail = req.decoded_email; //  trusted
-
-          const booking = await bookingCollection.findOne({
-            _id: new ObjectId(bookingId),
-          });
-          if (!booking)
-            return res.status(404).send({ message: "Booking not found" });
-
-          if (booking.status !== "accepted") {
-            return res.status(400).send({ message: "Booking not accepted" });
-          }
-
-          const now = new Date();
-          if (new Date(departure) < now) {
-            return res
-              .status(400)
-              .send({ message: "Cannot pay for expired booking" });
-          }
-
-          const session = await stripe.checkout.sessions.create({
-            payment_method_types: ["card"],
-            customer_email: payerEmail, //  Stripe receipt email
-            metadata: {
-              bookingId,
-              userEmail: payerEmail,
-              userName,
-            },
-            line_items: [
-              {
-                price_data: {
-                  currency: "usd",
-                  product_data: {
-                    name: ticketTitle,
-                    images: [ticketImage || "https://via.placeholder.com/150"],
-                    description: `${from} → ${to}`,
-                  },
-                  unit_amount: unitPrice * 100,
-                },
-                quantity,
-              },
-            ],
-            mode: "payment",
-            success_url: `${process.env.DOMAIN_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&bookingId=${bookingId}`,
-            cancel_url: `${process.env.DOMAIN_URL}/my-orders`,
-          });
-
-          res.send({ url: session.url });
-        } catch (err) {
-          res.status(500).send({
-            message: "Payment session creation failed",
-            error: err.message,
-          });
-        }
+        res.send({ url: session.url, sessionId: session.id });
+      } catch (error) {
+        console.error("Stripe session creation failed:", error);
+        res.status(500).send({
+          message: "Failed to create payment session",
+          error: error.message,
+        });
       }
-    );
+    });
 
     // verify payment
-    app.patch("/payment-success", verifyFirebaseToken, async (req, res) => {
+    app.patch("/payment-success", async (req, res) => {
       try {
-        const { session_id, bookingId } = req.query;
+        const sessionId = req.query.session_id;
+        if (!sessionId)
+          return res.status(400).send({ message: "Session ID is required" });
 
-        const session = await stripe.checkout.sessions.retrieve(session_id);
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
         if (session.payment_status !== "paid") {
           return res.status(400).send({ message: "Payment not completed" });
         }
 
-        const payerEmail = session.metadata.userEmail;
-        const payerName = session.metadata.userName;
+        const transactionId = session.payment_intent;
+        const { bookingId, userEmail, userName, ticketTitle, ticketImage } =
+          session.metadata;
+
+        const existingPayment = await paymentCollection.findOne({
+          bookingId: new ObjectId(bookingId),
+          status: "paid",
+        });
+
+        if (existingPayment) {
+          return res.send({
+            transactionId: existingPayment.transactionId,
+          });
+        }
 
         await bookingCollection.updateOne(
           { _id: new ObjectId(bookingId) },
@@ -635,33 +691,53 @@ async function run() {
             $set: {
               status: "paid",
               paymentDate: new Date(),
-              transactionId: session.payment_intent,
+              transactionId,
             },
           }
         );
 
         await paymentCollection.insertOne({
           bookingId: new ObjectId(bookingId),
-          userEmail: payerEmail,
-          userName: payerName,
+          userEmail,
+          userName,
+          ticketTitle,
+          ticketImage,
           amount: session.amount_total / 100,
           currency: session.currency,
-          transactionId: session.payment_intent,
+          transactionId,
+          status: "paid",
           paymentDate: new Date(),
         });
 
-        res.send({
-          message: "Payment successful",
-          transactionId: session.payment_intent,
+        res.send({ success: true, transactionId });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({
+          message: "Payment verification failed",
+          error: error.message,
         });
-      } catch (err) {
-        res
-          .status(500)
-          .send({ message: "Payment verification failed", error: err.message });
       }
     });
 
-    // riders api
+    // GET user transaction history
+    app.get("/payments/user", verifyFirebaseToken, async (req, res) => {
+      try {
+        const email = req.decoded_email;
+
+        // Get all payments for this user
+        const payments = await paymentCollection
+          .find({ userEmail: email })
+          .sort({ paymentDate: -1 }) // latest first
+          .toArray();
+
+        res.send(payments);
+      } catch (error) {
+        res.status(500).send({
+          message: "Failed to fetch transaction history",
+          error: error.message,
+        });
+      }
+    });
 
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
