@@ -74,6 +74,7 @@ async function run() {
     const ticketCollection = db.collection("tickets");
     const bookingCollection = db.collection("bookings");
     const trackingCollection = db.collection("tracking");
+    const advertiseCollection = db.collection("advertise");
 
     // tracking
     const generateTrackingId = async (trackingId, status) => {
@@ -419,7 +420,7 @@ async function run() {
         }
       }
     );
-    //
+    //get
     app.get("/tickets", verifyFirebaseToken, verifyAdmin, async (req, res) => {
       const tickets = await ticketCollection
         .find({})
@@ -427,6 +428,137 @@ async function run() {
         .toArray();
       res.send(tickets);
     });
+
+    // GET tickets for admin with vendor info, search, filter, pagination
+    app.get(
+      "/tickets/advertise",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const page = parseInt(req.query.page) || 1;
+          const limit = parseInt(req.query.limit) || 10;
+          const skip = (page - 1) * limit;
+
+          const searchText = req.query.searchText || "";
+          const transportType = req.query.transportType || "";
+
+          // 🔹 Build query
+          const query = { verificationStatus: "approved" };
+
+          if (searchText) {
+            query.$or = [
+              { title: { $regex: searchText, $options: "i" } },
+              { from: { $regex: searchText, $options: "i" } },
+              { to: { $regex: searchText, $options: "i" } },
+            ];
+          }
+
+          if (transportType) {
+            query.transportType = transportType;
+          }
+
+          // 🔹 Fetch paginated tickets
+          const tickets = await ticketCollection
+            .find(query)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .project({
+              title: 1,
+              from: 1,
+              to: 1,
+              transportType: 1,
+              price: 1,
+              quantity: 1,
+              departure: 1,
+              perks: 1,
+              image: 1,
+              vendor: 1,
+              verificationStatus: 1,
+              createdAt: 1,
+              verifiedAt: 1,
+            })
+            .toArray();
+
+          // 🔹 Total count
+          const totalTickets = await ticketCollection.countDocuments(query);
+
+          res.send({
+            success: true,
+            page,
+            limit,
+            totalPages: Math.ceil(totalTickets / limit),
+            totalTickets,
+            tickets,
+          });
+        } catch (error) {
+          console.error("Error fetching tickets:", error);
+          res.status(500).send({
+            success: false,
+            message: "Failed to fetch tickets",
+            error: error.message,
+          });
+        }
+      }
+    );
+
+    // advertise
+    app.post(
+      "/advertise",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const { ticketId } = req.body;
+
+          if (!ticketId) {
+            return res.status(400).send({ message: "Ticket ID required" });
+          }
+
+          const ticket = await ticketCollection.findOne({
+            _id: new ObjectId(ticketId),
+          });
+
+          if (!ticket) {
+            return res.status(404).send({ message: "Ticket not found" });
+          }
+
+          const alreadyAdvertised = await advertiseCollection.findOne({
+            originalTicketId: ticket._id,
+          });
+
+          if (alreadyAdvertised) {
+            return res
+              .status(409)
+              .send({ message: "Ticket already advertised" });
+          }
+
+          // 🔹 Remove original _id
+          const { _id, ...ticketData } = ticket;
+
+          const advertiseDoc = {
+            originalTicketId: _id, // keep reference
+            ...ticketData, // FULL ticket info
+            advertisedAt: new Date(),
+            advertisedBy: req.decoded_email,
+            isActive: true,
+          };
+
+          await advertiseCollection.insertOne(advertiseDoc);
+
+          res.send({
+            success: true,
+            message: "Ticket added to advertise successfully",
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Failed to add advertise",
+            error: error.message,
+          });
+        }
+      }
+    );
 
     // approve / reject ticket (admin only)
     app.patch(
