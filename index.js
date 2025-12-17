@@ -130,6 +130,55 @@ async function run() {
         }
       }
     );
+    // GET /vendors/overview
+    app.get(
+      "/vendors/overview",
+      verifyFirebaseToken,
+      verifyVendors,
+      async (req, res) => {
+        try {
+          const vendorEmail = req.decoded_email;
+
+          // 1️⃣ Total tickets added by vendor
+          const totalTicketsAdded = await ticketCollection.countDocuments({
+            "vendor.email": vendorEmail,
+          });
+
+          // 2️⃣ Total tickets sold by vendor
+          const soldTicketsAgg = await bookingCollection
+            .aggregate([
+              { $match: { vendorEmail, status: "paid" } },
+              { $group: { _id: null, totalSold: { $sum: "$quantity" } } },
+            ])
+            .toArray();
+
+          const totalTicketsSold = soldTicketsAgg[0]?.totalSold || 0;
+
+          // 3️⃣ Total revenue from paid bookings
+          const revenueAgg = await bookingCollection
+            .aggregate([
+              { $match: { vendorEmail, status: "paid" } },
+              {
+                $group: {
+                  _id: null,
+                  totalRevenue: { $sum: "$totalPrice" }, // make sure booking has totalPrice field
+                },
+              },
+            ])
+            .toArray();
+
+          const totalRevenue = revenueAgg[0]?.totalRevenue || 0;
+
+          res.send({ totalRevenue, totalTicketsSold, totalTicketsAdded });
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({
+            message: "Failed to fetch vendor overview",
+            error: err.message,
+          });
+        }
+      }
+    );
 
     app.get("/users", verifyFirebaseToken, async (req, res) => {
       // console.log(verifyFirebaseToken);
@@ -449,6 +498,113 @@ async function run() {
         .toArray();
       res.send(tickets);
     });
+
+    // UPDATE ticket by vendor
+    app.patch(
+      "/tickets/vendor/:id",
+      verifyFirebaseToken,
+      verifyVendors,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const email = req.decoded_email;
+          const updates = req.body;
+
+          const ticket = await ticketCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (!ticket) {
+            return res.status(404).send({ message: "Ticket not found" });
+          }
+
+          //  Ownership check
+          if (ticket.vendor?.email !== email) {
+            return res.status(403).send({ message: "Forbidden access" });
+          }
+
+          //  Rejected tickets cannot be updated
+          if (ticket.verificationStatus === "rejected") {
+            return res
+              .status(400)
+              .send({ message: "Rejected ticket cannot be updated" });
+          }
+
+          // Remove restricted fields
+          delete updates._id;
+          delete updates.vendor;
+          delete updates.verificationStatus;
+          delete updates.createdAt;
+
+          const result = await ticketCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: {
+                ...updates,
+                updatedAt: new Date(),
+                verificationStatus: "pending", // 🔄 needs re-approval
+              },
+            }
+          );
+
+          res.send({
+            success: true,
+            message: "Ticket updated successfully",
+            result,
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Failed to update ticket",
+            error: error.message,
+          });
+        }
+      }
+    );
+
+    // DELETE ticket by vendor
+    app.delete(
+      "/tickets/vendor/:id",
+      verifyFirebaseToken,
+      verifyVendors,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const email = req.decoded_email;
+
+          const ticket = await ticketCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (!ticket) {
+            return res.status(404).send({ message: "Ticket not found" });
+          }
+
+          //  Ownership check
+          if (ticket.vendor?.email !== email) {
+            return res.status(403).send({ message: "Forbidden access" });
+          }
+
+          //  Rejected tickets cannot be deleted
+          if (ticket.verificationStatus === "rejected") {
+            return res
+              .status(400)
+              .send({ message: "Rejected ticket cannot be deleted" });
+          }
+
+          await ticketCollection.deleteOne({ _id: new ObjectId(id) });
+
+          res.send({
+            success: true,
+            message: "Ticket deleted successfully",
+          });
+        } catch (error) {
+          res.status(500).send({
+            message: "Failed to delete ticket",
+            error: error.message,
+          });
+        }
+      }
+    );
 
     // get advertise for all
     // GET all advertised tickets (latest first)
