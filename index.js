@@ -24,13 +24,6 @@ admin.initializeApp({
 });
 
 // trackingId
-const generateTrackingId = () => {
-  const prefix = "PRCL";
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
-  const random = Math.random().toString(36).substring(2, 10).toUpperCase(); // 8-char random
-
-  return `${prefix}-${date}-${random}`;
-};
 
 // middlewares
 app.use(express.json());
@@ -368,18 +361,69 @@ async function run() {
       }
     );
 
-    // GET approved tickets for users
+    // GET approved tickets for users with search, filter, pagination
     app.get("/tickets/approved", async (req, res) => {
       try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        const searchText = req.query.searchText || "";
+        const transportType = req.query.transportType || "";
+
+        //  Build query
+        const query = { verificationStatus: "approved" };
+
+        if (searchText) {
+          query.$or = [
+            { title: { $regex: searchText, $options: "i" } },
+            { from: { $regex: searchText, $options: "i" } },
+            { to: { $regex: searchText, $options: "i" } },
+          ];
+        }
+
+        if (transportType) {
+          query.transportType = transportType;
+        }
+
+        //  Fetch paginated tickets
         const tickets = await ticketCollection
-          .find({ verificationStatus: "approved" })
+          .find(query)
           .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .project({
+            title: 1,
+            from: 1,
+            to: 1,
+            transportType: 1,
+            price: 1,
+            quantity: 1,
+            departure: 1,
+            perks: 1,
+            image: 1,
+            vendor: 1,
+            verificationStatus: 1,
+            createdAt: 1,
+          })
           .toArray();
 
-        res.send(tickets);
+        //  Total count
+        const totalTickets = await ticketCollection.countDocuments(query);
+
+        res.send({
+          success: true,
+          page,
+          limit,
+          totalPages: Math.ceil(totalTickets / limit),
+          totalTickets,
+          tickets,
+        });
       } catch (error) {
+        console.error("Error fetching tickets:", error);
         res.status(500).send({
-          message: "Failed to fetch approved tickets",
+          success: false,
+          message: "Failed to fetch tickets",
           error: error.message,
         });
       }
