@@ -110,6 +110,27 @@ async function run() {
       next();
     };
 
+    // admin overview
+    app.get(
+      "/admin/overview",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const totalVendors = await vendorCollection.countDocuments();
+          const totalTickets = await ticketCollection.countDocuments();
+          const totalUsers = await userCollection.countDocuments();
+
+          res.send({ totalVendors, totalTickets, totalUsers });
+        } catch (error) {
+          res.status(500).send({
+            message: "Failed to fetch dashboard data",
+            error: error.message,
+          });
+        }
+      }
+    );
+
     app.get("/users", verifyFirebaseToken, async (req, res) => {
       // console.log(verifyFirebaseToken);
       const searchText = req.query.searchText;
@@ -427,6 +448,54 @@ async function run() {
         .sort({ createdAt: -1 })
         .toArray();
       res.send(tickets);
+    });
+
+    // get advertise for all
+    // GET all advertised tickets (latest first)
+    app.get("/advertise", async (req, res) => {
+      try {
+        const advertiseTickets = await advertiseCollection
+          .find()
+          .sort({ advertisedAt: -1 })
+          .toArray();
+
+        res.send(advertiseTickets);
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Failed to fetch advertised tickets",
+          error: error.message,
+        });
+      }
+    });
+
+    // single advertise
+    app.get("/advertise/:id", async (req, res) => {
+      const { id } = req.params;
+
+      try {
+        const ticket = await advertiseCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!ticket) {
+          return res.status(404).send({
+            success: false,
+            message: "Advertised ticket not found",
+          });
+        }
+
+        res.send({
+          success: true,
+          data: ticket,
+        });
+      } catch (error) {
+        res.status(500).send({
+          success: false,
+          message: "Failed to fetch advertised ticket",
+          error: error.message,
+        });
+      }
     });
 
     // GET tickets for admin with vendor info, search, filter, pagination
