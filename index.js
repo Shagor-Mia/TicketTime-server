@@ -438,12 +438,48 @@ async function run() {
         try {
           const email = req.decoded_email;
 
+          // Pagination
+          const page = parseInt(req.query.page) || 1;
+          const limit = parseInt(req.query.limit) || 6;
+          const skip = (page - 1) * limit;
+
+          // Filters
+          const searchText = req.query.searchText || "";
+          const transportType = req.query.transportType || "";
+
+          // Build query
+          const query = { "vendor.email": email };
+
+          if (searchText) {
+            query.$or = [
+              { title: { $regex: searchText, $options: "i" } },
+              { from: { $regex: searchText, $options: "i" } },
+              { to: { $regex: searchText, $options: "i" } },
+            ];
+          }
+
+          if (transportType) {
+            query.transportType = transportType;
+          }
+
+          // Fetch paginated tickets
           const tickets = await ticketCollection
-            .find({ "vendor.email": email })
+            .find(query)
             .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
             .toArray();
 
-          res.send(tickets);
+          const totalTickets = await ticketCollection.countDocuments(query);
+
+          res.send({
+            success: true,
+            page,
+            limit,
+            totalPages: Math.ceil(totalTickets / limit),
+            totalTickets,
+            tickets,
+          });
         } catch (error) {
           res.status(500).send({
             message: "Failed to fetch vendor tickets",
@@ -918,14 +954,53 @@ async function run() {
 
     // user bookings
     app.get("/bookings/user", verifyFirebaseToken, async (req, res) => {
-      const email = req.decoded_email;
+      try {
+        const email = req.decoded_email;
 
-      const bookings = await bookingCollection
-        .find({ userEmail: email })
-        .sort({ createdAt: -1 })
-        .toArray();
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 6;
+        const skip = (page - 1) * limit;
 
-      res.send(bookings);
+        const searchText = req.query.searchText || "";
+        const transportType = req.query.transportType || "";
+
+        const query = { userEmail: email };
+
+        if (searchText) {
+          query.$or = [
+            { ticketTitle: { $regex: searchText, $options: "i" } },
+            { from: { $regex: searchText, $options: "i" } },
+            { to: { $regex: searchText, $options: "i" } },
+          ];
+        }
+
+        if (transportType) {
+          query.transportType = transportType;
+        }
+
+        const bookings = await bookingCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        const totalBookings = await bookingCollection.countDocuments(query);
+
+        res.send({
+          success: true,
+          page,
+          limit,
+          totalPages: Math.ceil(totalBookings / limit),
+          totalBookings,
+          bookings,
+        });
+      } catch (error) {
+        res.status(500).send({
+          message: "Failed to fetch bookings",
+          error: error.message,
+        });
+      }
     });
 
     // get all bookings
